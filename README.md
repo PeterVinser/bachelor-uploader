@@ -1,4 +1,4 @@
-# bachelor-api
+# bachelor-uploader
 
 This is an uploader API for bachelor's thesis app that serves as an admin for RAG service.
 
