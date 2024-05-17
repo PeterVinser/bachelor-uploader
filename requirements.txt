@@ -6,3 +6,4 @@ langchain_experimental==0.0.57
 langchain_community==0.0.36
 weaviate-client==4.4.4
 neo4j==5.20.0
+uuid==1.30

@@ -1,15 +1,8 @@
 from flask import jsonify
-from langchain_experimental.text_splitter import SemanticChunker
-from langchain_openai import OpenAIEmbeddings
+from app.services.splitter import split_to_chunks
 import weaviate
 import os
-
-def split_to_chunks(document_content):
-    text_splitter = SemanticChunker(OpenAIEmbeddings())
-    
-    chunks = text_splitter.create_documents([document_content])
-
-    return [chunk.page_content for chunk in chunks]
+from app.services.knowledge_base import add_to_vector_db
 
 def save_to_db(document_name, chunks):
     client = weaviate.connect_to_wcs(
@@ -43,6 +36,11 @@ def handle_add_documents(request):
 
     chunks = split_to_chunks(document_content)
 
-    uuids = save_to_db(document_name, chunks)
+    uuids = []
+
+    for chunk in chunks:
+        uuid = add_to_vector_db(chunk)
+
+        uuids.append(uuid)
     
     return jsonify({"resultMessage": f"document {document_name} added"})
