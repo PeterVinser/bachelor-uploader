@@ -1,53 +1,42 @@
 from flask import jsonify
-from langchain_openai import ChatOpenAI
+from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from langchain_community.graphs.neo4j_graph import Neo4jGraph
 from langchain_experimental.graph_transformers import LLMGraphTransformer
 from langchain_core.documents import Document
 from app.services.splitter import split_to_chunks
-import weaviate
 import uuid
-from app.services.knowledge_base import get_weaviate_client
+from app.services.vector_store import VectorStore
+from app.services.graph_store import GraphStore, extraction_prompt
+import os
 
-def add_node_to_weaviate(collection, node):
-    already_exists = collection.query.fetch_objects(
-        filters=weaviate.classes.query.Filter.by_property("entityId").equal(node.id)
-    )
+def add_relation_embeddings(graph_documents):
+    for doc in graph_documents:
+        embeddings = OpenAIEmbeddings()
 
-    if len(already_exists.objects) == 0:
-        entity_object = {
-            "entityId": node.id,
-            "entityType": node.type
-        }
+        for relation in doc.relationships:
+            type_embedding = embeddings.embed_query(relation.type)
+            relation.properties['embedding'] = type_embedding
 
-        collection.data.insert(entity_object)
-
-def add_chunk_to_graph(graph, chunk, chunk_id):
-    graph.query(
-        "CREATE (d:DocumentChunk {content: $content, id: $id})",
-        params={"content": chunk, "id": str(chunk_id)}
-    )
-
-def link_node_with_chunk(graph, node, chunk_id):
-    graph.query(
-        f"MATCH (e:{node.type} {{id: $id}}), (d:DocumentChunk {{id: $chunk_id}}) CREATE (e)-[:EXTRACTED_FROM]->(d)",
-        params={"id": node.id, "chunk_id": str(chunk_id)}
-    )
-
-def add_chunk_to_db(graph, collection, llm_transformer, chunk):
+def add_chunk_to_db(graph, llm_transformer, chunk):
         chunk_id = uuid.uuid4()
 
-        add_chunk_to_graph(graph, chunk, chunk_id)
+        with GraphStore(uri=os.getenv("NEO4J_HYBRID_URI"), password=os.getenv("NEO4J_HYBRID_PASSWORD")) as graph_store:
+            graph_store.add_chunk(chunk_id, chunk)
 
         graph_documents = llm_transformer.convert_to_graph_documents([Document(page_content=chunk)])
+
+        add_relation_embeddings(graph_documents)
 
         graph.add_graph_documents(graph_documents)
 
         for doc in graph_documents:
             for node in doc.nodes:
-                add_node_to_weaviate(collection, node)
-                link_node_with_chunk(graph, node, chunk_id)
-    
+                with VectorStore() as store:
+                    store.add_entity(node)
 
+                with GraphStore(uri=os.getenv("NEO4J_HYBRID_URI"), password=os.getenv("NEO4J_HYBRID_PASSWORD")) as graph_store:
+                    graph_store.link_node_with_chunk(node, chunk_id)
+    
 def handle_documents(request):
     document_name, document_content = request.json['documentName'], request.json['documentContent']
 
@@ -55,20 +44,14 @@ def handle_documents(request):
 
     llm = ChatOpenAI(temperature=0, model="gpt-4o")
 
-    llm_transformer = LLMGraphTransformer(llm=llm)
+    llm_transformer = LLMGraphTransformer(llm=llm, prompt=extraction_prompt)
 
-    graph = Neo4jGraph()
-
-    client = get_weaviate_client()
-
-    entities_collection = client.collections.get("BachelorEntity")
+    graph = Neo4jGraph(url=os.getenv("NEO4J_HYBRID_URI"), password=os.getenv("NEO4J_HYBRID_PASSWORD"))
 
     for chunk in chunks:
         if chunk == '':
             continue
 
-        add_chunk_to_db(graph, entities_collection, llm_transformer, chunk)
-
-    client.close()
+        add_chunk_to_db(graph, llm_transformer, chunk)
 
     return jsonify({"resultMessage": f"document {document_name} added"})
